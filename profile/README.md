@@ -1,35 +1,18 @@
 # Logiforma
 
-**Multi-region cloud infrastructure on AWS, managed as code with OpenTofu.**
+**A multi-tenant SaaS platform on AWS, managed entirely as code.**
 
-Logiforma is a modular infrastructure platform built on AWS, orchestrated through multiple purpose-specific repositories. Each repository owns a single layer of the stack — from networking foundations to databases and observability — enabling independent deployments with clear dependency boundaries.
+Logiforma is built as two complementary layers, each a set of purpose-specific
+repositories with clear dependency boundaries and independent deployments:
 
-## Architecture
+1. **Core cloud platform** — regional foundations: networking, databases, observability (OpenTofu).
+2. **Application & tenant platform** — the serverless services that onboard tenants and run the products (OpenTofu + Terragrunt, all serverless).
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           Topology                                      │
-│              Single source of truth for all configuration               │
-│         regions · databases · observability · domains · dashboards       │
-└────────────────────────────┬────────────────────────────────────────────┘
-                             │
-              ┌──────────────▼──────────────┐
-              │          Networking          │
-              │   VPCs · Subnets · Endpoints │
-              │   API Gateway · Cloudflare   │
-              └──────┬───────────────┬──────┘
-                     │               │
-          ┌──────────▼───┐   ┌───────▼──────────┐
-          │   Databases  │   │  Observability    │
-          │ Aurora PostgreSQL│   │  LGTM + Alloy   │
-          │ Secrets Manager │   │  Grafana Proxy   │
-          └──────────────┘   │  S3 Dashboards    │
-                             └──────────────────┘
-```
-
-Repositories are deployed in order: **Topology → Networking → Databases → Observability**. Each layer reads upstream configuration via OpenTofu remote state.
+---
 
 ## Repositories
+
+### Core cloud platform
 
 | Repository | Description |
 |------------|-------------|
@@ -38,78 +21,83 @@ Repositories are deployed in order: **Topology → Networking → Databases → 
 | **[Databases](https://github.com/Logiforma/Databases)** | Aurora PostgreSQL clusters — serverless v2 for DEV, provisioned instances for PROD. Encrypted storage, managed passwords via Secrets Manager, automated backups. |
 | **[Observability](https://github.com/Logiforma/Observability)** | Full LGTM stack (Loki, Grafana, Tempo, Mimir) plus Grafana Alloy as a unified telemetry collector. Per-region Lightsail instances, S3 storage backends, API Gateway proxy for Grafana, and Cloudflare DNS. |
 
-## Technology Stack
+### Application & tenant platform
+
+| Repository | Description |
+|------------|-------------|
+| **[Atlas](https://github.com/Logiforma/atlas)** | Central infrastructure-as-code (OpenTofu + Terragrunt) for the serverless application platform — DynamoDB, Cognito (one user pool per tenant), S3/CloudFront, API Gateway, Lambda runtime platforms, SES, SQS, and IAM. Config-driven per environment. |
+| **[Bootstrap](https://github.com/Logiforma/bootstrap)** | Run-once stack that creates the remote OpenTofu state backend (encrypted, versioned S3 + lock table) per environment. |
+| **[sentinel-middleware](https://github.com/Logiforma/sentinel-middleware)** | Sentinel admin API — tenant onboarding, per-tenant Cognito pools, user management, notification templates. FastAPI + Mangum on Lambda. |
+| **[sentinel-ui](https://github.com/Logiforma/sentinel-ui)** | Sentinel admin console for staff — tenants, users, notifications, system health. Vue 3 SPA on S3 + CloudFront. |
+| **[notification-engine](https://github.com/Logiforma/notification-engine)** | Async, SQS-driven Lambda worker that renders templates and sends transactional email via Amazon SES. |
+
+---
+
+## Architecture
+
+### Core cloud platform
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                            Topology                                │
+│         Single source of truth for all configuration               │
+│      regions · databases · observability · domains · dashboards    │
+└────────────────────────────┬───────────────────────────────────────┘
+                             │
+              ┌──────────────▼──────────────┐
+              │          Networking          │
+              │   VPCs · Subnets · Endpoints │
+              │   API Gateway · Cloudflare   │
+              └──────┬───────────────┬───────┘
+                     │               │
+          ┌──────────▼─────┐   ┌──────▼───────────┐
+          │   Databases    │   │  Observability   │
+          │ Aurora Postgres│   │  LGTM + Alloy    │
+          │ Secrets Manager│   │  Grafana Proxy   │
+          └────────────────┘   └──────────────────┘
+```
+
+Deployed in order **Topology → Networking → Databases → Observability**; each layer
+reads upstream configuration via OpenTofu remote state.
+
+### Application & tenant platform (serverless)
+
+```
+Staff ─▶ Sentinel UI ─▶ Sentinel API ─┬─▶ DynamoDB (tenants · users · templates · logs)
+ (Entra SSO / Cognito)  (Lambda + API GW)│
+                                         ├─▶ Cognito (one user pool per tenant)
+                                         └─▶ SQS ─▶ Notification Engine ─▶ SES ✉
+```
+
+**Atlas** provisions the shared resources and publishes each app's configuration to
+SSM Parameter Store; the application repos read that contract and **deploy themselves**
+via GitHub Actions (OIDC — no long-lived AWS keys), independently of Atlas. Everything
+here is serverless and free-tier-first.
+
+---
+
+## Technology stack
 
 | Layer | Technology |
 |-------|------------|
-| **IaC** | OpenTofu >= 1.9.0, S3 + DynamoDB backend |
-| **Compute** | AWS Lightsail (LGTM stack), Lambda (application) |
-| **Database** | Aurora PostgreSQL 16.4 (serverless v2 / provisioned) |
-| **Networking** | VPC, API Gateway v2 (HTTP), VPC Endpoints |
+| **IaC** | OpenTofu (≥ 1.9), S3 remote state; Terragrunt for the application platform |
+| **Compute** | Lightsail (LGTM stack), AWS Lambda (applications) |
+| **Data** | Aurora PostgreSQL 16.4 (core platform) · DynamoDB (application platform) |
+| **Identity** | Amazon Cognito + Microsoft Entra SSO (per-tenant pools) |
+| **Networking / edge** | VPC, API Gateway v2 (HTTP), CloudFront, Cloudflare DNS |
+| **Messaging** | Amazon SQS + SES (transactional email) |
 | **Observability** | Grafana, Loki, Tempo, Mimir, Alloy |
-| **DNS** | Cloudflare (automated via OpenTofu) |
-| **CI/CD** | GitHub Actions — branch-based deployment |
-| **Secrets** | AWS Secrets Manager, GitHub Actions Secrets |
+| **CI/CD** | GitHub Actions — branch-based deployment, OIDC federation |
+| **Secrets / config** | AWS Secrets Manager, SSM Parameter Store, GitHub Environments |
 
-## Regional Architecture
-
-Infrastructure is deployed per-region with friendly subdomain prefixes:
-
-| Region | Prefix | API Endpoint | Grafana |
-|--------|--------|-------------|---------|
-| ap-south-1 (Mumbai) | `mumbai` | `mumbai.{domain}` | `mumbai.grafana.{domain}` |
-| eu-west-1 (Ireland) | `ireland` | `ireland.{domain}` | `ireland.grafana.{domain}` |
-
-Each region gets its own VPC, Aurora cluster, LGTM+Alloy stack, S3 buckets, and API Gateway — fully isolated.
-
-### Telemetry with Grafana Alloy
-
-Grafana Alloy serves as the single external entry point for all telemetry data per region:
-
-```
-Applications ──OTLP──▶ Alloy (4317/4318) ──▶ Tempo (traces)
-                                            ──▶ Mimir (metrics)
-             ──Loki──▶ Alloy (3100)        ──▶ Loki  (logs)
-Docker logs ────────▶ Alloy (discovery)     ──▶ Loki  (logs)
-```
-
-Backend services (Loki, Tempo, Mimir) are internal-only — Alloy is the only publicly exposed collector.
+---
 
 ## Environments
 
 | Environment | Branch | Domain | Regions | Purpose |
 |-------------|--------|--------|---------|---------|
-| **DEV** | `dev` | `logiforma.dev` | 1 (Mumbai) | Development, cost-optimised |
-| **PROD** | `main` | `logiforma.com` | 2 (Mumbai + Ireland) | Production, high availability |
+| **DEV** | `dev` | `logiforma.dev` | Mumbai | Development, cost-optimised |
+| **PROD** | `main` | `logiforma.com` | Mumbai + Ireland | Production, high availability |
 
-Pushing to `dev` auto-deploys to DEV. Merging to `main` deploys to PROD.
-
-## Getting Started
-
-Each repository can be deployed locally with OpenTofu:
-
-```bash
-# 1. Deploy Topology first
-cd Topology
-tofu init -backend-config="key=topology/dev/terraform.tfstate"
-tofu apply -var-file="environments/dev.tfvars"
-
-# 2. Then Networking
-cd ../Networking
-tofu init -backend-config="key=networking/dev/terraform.tfstate"
-tofu apply -var-file="environments/dev.tfvars" -var="cloudflare_api_token=$CF_TOKEN"
-
-# 3. Then Databases
-cd ../Databases
-tofu init -backend-config="key=databases/dev/terraform.tfstate"
-tofu apply -var-file="environments/dev.tfvars"
-
-# 4. Finally Observability
-cd ../Observability
-tofu init -backend-config="key=observability/dev/terraform.tfstate"
-tofu apply -var-file="environments/dev.tfvars" \
-  -var="grafana_admin_password=$GRAFANA_PW" \
-  -var="cloudflare_api_token=$CF_TOKEN"
-```
-
-See individual repositories for detailed documentation.
+Pushing to `dev` auto-deploys to DEV; merging to `main` deploys to PROD. See each
+repository's README for details.
